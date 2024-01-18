@@ -1,0 +1,22 @@
+遇到的问题及解决方法：
+1.cargo build --target riscv64gc-unknown-none-elf出错：
+    the name `_start` is defined multiple times
+cannot find trait `Write` in this scope
+ 	 failed to resolve: use of undeclared crate or module `fmt`
+删除重复定义的_start函数，添加use core::fmt;和use core::fmt::Write;
+2.在kalning@ubuntu:~/os/src目录下运行qemu-riscv64target/riscv64gc-unknown-none-elf/debug/os; echo $?找不到文件
+应在os目录下运行
+3.make: *** No targets specified and no makefile found. Stop.
+在os文件中加入`Makefile` 的文件
+4.cannot find function `shutdown` in this scope
+在main.rs文件中引入sbi模块：mod sbi;
+5.warning: `#[macro_export]` only has an effect on macro definitions
+error: linking with `rust-lld` failed: exit status: 1
+将rust_main函数标记为#[no_mangle]
+#[no_mangle]
+pub extern "C" fn rust_main() -> ! { 
+    		clear_bss(); 
+    		shutdown(); 
+}
+6.recipe for target 'run-inner' failed
+在文件夹中添加bootloader文件夹
