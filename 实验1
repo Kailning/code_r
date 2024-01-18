@@ -1,3 +1,288 @@
+用 Cargo 工具创建 Rust 项目。
+
+$ cargo new os
+项目的文件结构如下：
+$ tree os
+os
+├── Cargo.toml
+└── src
+    └── main.rs
+
+1 directory, 2 files
+其中 Cargo.toml 中保存了项目的库依赖、作者信息等。
+
+cargo 为我们准备好了 Hello world! 源代码：
+
+最简单的 Rust 应用
+1fn main() {
+2    println!("Hello, world!");
+3}
+输入 cargo run 构建并运行项目：
+
+   Compiling os v0.1.0 (/home/shinbokuow/workspace/v3/rCore-Tutorial-v3/os)
+    Finished dev [unoptimized + debuginfo] target(s) in 1.15s
+     Running `target/debug/os`
+Hello, world!
+我们在屏幕上看到了一行 Hello, world! ，但为了打印出 Hello, world!，我们需要的不止几行源代码。
+修改目标平台
+将程序的目标平台换成 riscv64gc-unknown-none-elf，
+$ cargo run --target riscv64gc-unknown-none-elf
+   Compiling os v0.1.0 (/home/shinbokuow/workspace/v3/rCore-Tutorial-v3/os)
+error[E0463]: can't find crate for `std`
+  |
+  = note: the `riscv64gc-unknown-none-elf` target may not be installed
+报错的原因是目标平台上确实没有 Rust 标准库 std，也不存在任何受 OS 支持的系统调用。 这样的平台被称为 裸机平台 (bare-metal)。
+除了 std 之外，Rust 还有一个不需要任何操作系统支持的核心库 core， 它包含了 Rust 语言相当一部分核心机制，可以满足本门课程的需求。 有很多第三方库也不依赖标准库 std，而仅仅依赖核心库 core。
+为了以裸机平台为目标编译程序，我们要将对标准库 std 的引用换成核心库 core。
+
+移除标准库依赖
+首先在 os 目录下新建 .cargo 目录，并在这个目录下创建 config 文件，输入如下内容：
+# os/.cargo/config
+[build]
+target = "riscv64gc-unknown-none-elf"
+这将使 cargo 工具在 os 目录下默认会使用 riscv64gc-unknown-none-elf 作为目标平台。 这种编译器运行的平台（x86_64）与可执行文件运行的目标平台不同的情况，称为 交叉编译 (Cross Compile)。
+
+移除 println! 宏
+在 main.rs 的开头加上一行 #![no_std]
+提供语义项 panic_handler
+新建一个子模块 lang_items.rs，在里面编写 panic 处理函数，通过标记 #[panic_handler] 告知编译器采用我们的实现：
+// os/src/lang_items.rs
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    loop {}
+}
+在 main.rs 的开头加入设置 #![no_main] 告诉编译器我们没有一般意义上的 main 函数， 并将原来的 main 函数删除。这样编译器也就不需要考虑初始化工作了。
+
+$ cargo build
+   Compiling os v0.1.0 (/home/shinbokuow/workspace/v3/rCore-Tutorial-v3/os)
+    Finished dev [unoptimized + debuginfo] target(s) in 0.06s
+执行环境初始化
+首先我们要给 Rust 编译器编译器提供入口函数 _start() ， 在 main.rs 中添加如下内容：
+
+// os/src/main.rs
+#[no_mangle]
+extern "C" fn _start() {
+    loop{};
+}
+
+目前的执行环境还缺了一个退出机制，我们需要操作系统提供的 exit 系统调用来退出程序：
+// os/src/main.rs
+const SYSCALL_EXIT: usize = 93;
+fn syscall(id: usize, args: [usize; 3]) -> isize {
+    let mut ret;
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inlateout("x10") args[0] => ret,
+            in("x11") args[1],
+            in("x12") args[2],
+            in("x17") id,
+        );
+    }
+    ret
+}
+pub fn sys_exit(xstate: i32) -> isize {
+    syscall(SYSCALL_EXIT, [xstate as usize, 0, 0])
+}
+#[no_mangle]
+extern "C" fn _start() {
+    sys_exit(9);
+}
+实现输出字符串的相关函数
+首先封装一下对 SYSCALL_WRITE 系统调用。
+const SYSCALL_WRITE: usize = 64;
+pub fn sys_write(fd: usize, buffer: &[u8]) -> isize {
+  syscall(SYSCALL_WRITE, [fd, buffer.as_ptr() as usize, buffer.len()])
+}
+然后实现基于 Write Trait 的数据结构，并完成 Write Trait 所需要的 write_str 函数，并用 print 函数进行包装。
+struct Stdout;
+impl Write for Stdout {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        sys_write(1, s.as_bytes());
+        Ok(())
+    }
+}
+pub fn print(args: fmt::Arguments) {
+    Stdout.write_fmt(args).unwrap();
+}
+最后，实现基于 print 函数，实现Rust语言 格式化宏 ( formatting macros )。
+#[macro_export]
+macro_rules! print {
+    ($fmt: literal $(, $($arg: tt)+)?) => {
+        $crate::console::print(format_args!($fmt $(, $($arg)+)?));
+    }
+}
+#[macro_export]
+macro_rules! println {
+    ($fmt: literal $(, $($arg: tt)+)?) => {
+        print(format_args!(concat!($fmt, "\n") $(, $($arg)+)?));
+    }
+}
+接下来，我们调整一下应用程序，让它发出显示字符串和退出的请求：
+#[no_mangle]
+extern "C" fn _start() {
+    println!("Hello, world!");
+    sys_exit(9);
+}
+现在，我们编译并执行一下，可以看到正确的字符串输出，且程序也能正确退出！
+
+实现关机功能
+对上一节实现的代码稍作调整，通过 ecall 调用 RustSBI 实现关机功能：
+// bootloader/rustsbi-qemu.bin 直接添加的SBI规范实现的二进制代码，给操作系统提供基本支持服务
+
+// os/src/sbi.rs
+fn sbi_call(which: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
+ let mut ret;
+  unsafe {
+      core::arch::asm!(
+          "ecall",
+...
+const SBI_SHUTDOWN: usize = 8;
+
+pub fn shutdown() -> ! {
+    sbi_call(SBI_SHUTDOWN, 0, 0, 0);
+    panic!("It should shutdown!");
+}
+// os/src/main.rs
+#[no_mangle]
+extern "C" fn _start() {
+    shutdown();
+}
+应用程序访问操作系统提供的系统调用的指令是 ecall ，操作系统访问 RustSBI提供的SBI调用的指令也是 ecall ， 虽然指令一样，但它们所在的特权级是不一样的。 
+简单地说，应用程序位于最弱的用户特权级（User Mode）， 操作系统位于内核特权级（Supervisor Mode）， RustSBI位于机器特权级（Machine Mode）。 
+。
+编译执行，结果如下：
+
+# 编译生成ELF格式的执行文件
+$ cargo build --release
+ Compiling os v0.1.0 (/media/chyyuu/ca8c7ba6-51b7-41fc-8430-e29e31e5328f/thecode/rust/os_kernel_lab/os)
+  Finished release [optimized] target(s) in 0.15s
+# 把ELF执行文件转成bianary文件
+$ rust-objcopy --binary-architecture=riscv64 target/riscv64gc-unknown-none-elf/release/os --strip-all -O binary target/riscv64gc-unknown-none-elf/release/os.bin
+
+# 加载运行
+$ qemu-system-riscv64 -machine virt -nographic -bios ../bootloader/rustsbi-qemu.bin -device loader,file=target/riscv64gc-unknown-none-elf/release/os.bin,addr=0x80200000
+# 无法退出，风扇狂转，感觉碰到死循环
+问题在哪？通过 rust-readobj 分析 os 可执行程序，发现其入口地址不是 RustSBI 约定的 0x80200000 。我们需要修改程序的内存布局并设置好栈空间。
+
+设置正确的程序内存布局
+可以通过 链接脚本 (Linker Script) 调整链接器的行为，使得最终生成的可执行文件的内存布局符合我们的预期。
+
+修改 Cargo 的配置文件来使用我们自己的链接脚本 os/src/linker.ld：
+
+// os/.cargo/config
+[build]
+target = "riscv64gc-unknown-none-elf"
+[target.riscv64gc-unknown-none-elf]
+rustflags = [
+    "-Clink-arg=-Tsrc/linker.ld", "-Cforce-frame-pointers=yes"
+]
+具体的链接脚本 os/src/linker.ld 如下：
+ OUTPUT_ARCH(riscv)
+ ENTRY(_start)
+ BASE_ADDRESS = 0x80200000;
+ SECTIONS
+ {
+     . = BASE_ADDRESS;
+     skernel = .;
+ 
+    stext = .;
+    .text : {
+        *(.text.entry)
+        *(.text .text.*)
+    }
+
+    . = ALIGN(4K);
+    etext = .;
+    srodata = .;
+    .rodata : {
+        *(.rodata .rodata.*)
+    }
+
+    . = ALIGN(4K);
+    erodata = .;
+    sdata = .;
+    .data : {
+        *(.data .data.*)
+    }
+
+    . = ALIGN(4K);
+    edata = .;
+    .bss : {
+        *(.bss.stack)
+        sbss = .;
+        *(.bss .bss.*)
+    }
+    . = ALIGN(4K);
+    ebss = .;
+    ekernel = .;
+    /DISCARD/ : {
+        *(.eh_frame)
+    }
+}
+第 1 行我们设置了目标平台为 riscv ；第 2 行我们设置了整个程序的入口点为之前定义的全局符号 _start； 第 3 行定义了一个常量 BASE_ADDRESS 为 0x80200000 ，RustSBI 期望的 OS 起始地址；
+从 BASE_ADDRESS 开始，代码段 .text, 只读数据段 .rodata，数据段 .data, bss 段 .bss 由低到高依次放置， 且每个段都有两个全局变量给出其起始和结束地址（比如 .text 段的开始和结束地址分别是 stext 和 etext ）。
+
+正确配置栈空间布局
+用另一段汇编代码初始化栈空间：
+ # os/src/entry.asm
+     .section .text.entry
+     .globl _start
+ _start:
+     la sp, boot_stack_top
+     call rust_main
+     .section .bss.stack
+     .globl boot_stack
+boot_stack:
+    .space 4096 * 16
+    .globl boot_stack_top
+boot_stack_top:
+在第 8 行，我们预留了一块大小为 4096 * 16 字节，也就是  的空间， 用作操作系统的栈空间。 栈顶地址被全局符号 boot_stack_top 标识，栈底则被全局符号 boot_stack 标识。
+同时，这块栈空间被命名为 .bss.stack ，链接脚本里有它的位置。
+_start 作为操作系统的入口地址，将依据链接脚本被放在 BASE_ADDRESS 处。 la sp, boot_stack_top 作为 OS 的第一条指令， 将 sp 设置为栈空间的栈顶。
+简单起见，我们目前不考虑 sp 越过栈底 boot_stack ，也就是栈溢出的情形。 第二条指令则是函数调用 rust_main ，这里的 rust_main 是我们稍后自己编写的应用入口。
+接着，我们在 main.rs 中嵌入这些汇编代码并声明应用入口 rust_main ：
+ // os/src/main.rs
+ #![no_std]
+ #![no_main]
+ mod lang_items;
+ core::arch::global_asm!(include_str!("entry.asm"));
+ #[no_mangle]
+pub fn rust_main() -> ! {
+    shutdown();
+}
+背景高亮指出了 main.rs 中新增的代码。
+第 7 行，我们使用 global_asm 宏，将同目录下的汇编文件 entry.asm 嵌入到代码中。
+从第 9 行开始， 我们声明了应用的入口点 rust_main ，需要注意的是，这里通过宏将 rust_main 标记为 #[no_mangle] 以避免编译器对它的名字进行混淆，
+不然在链接时， entry.asm 将找不到 main.rs 提供的外部符号 rust_main，导致链接失败。
+再次使用上节中的编译，生成和运行操作，我们看到QEMU模拟的RISC-V 64计算机退出了
+
+清空 .bss 段
+清零 .bss 段 的工作我们还没有完成。
+ // os/src/main.rs
+ fn clear_bss() {
+     extern "C" {
+         fn sbss();
+         fn ebss();
+    }
+     (sbss as usize..ebss as usize).for_each(|a| {
+         unsafe { (a as *mut u8).write_volatile(0) }
+     });
+}
+
+pub fn rust_main() -> ! {
+    clear_bss();
+    shutdown();
+}
+链接脚本 linker.ld 中给出的全局符号 sbss 和 ebss 让我们能轻松确定 .bss 段的位置。
+
+添加裸机打印相关函数
+在上一节中我们为用户态程序实现的 println 宏，略作修改即可用于本节的内核态操作系统。 详见 os/src/console.rs。
+利用 println 宏，我们重写异常处理函数 panic，使其在 panic 时能打印错误发生的位置。 相关代码位于 os/src/lang_items.rs 中。
+我们还使用第三方库 log 为你实现了日志模块，相关代码位于 os/src/logging.rs 中。
+
+
 遇到的问题及解决方法：
 1.cargo build --target riscv64gc-unknown-none-elf出错：
     the name `_start` is defined multiple times
